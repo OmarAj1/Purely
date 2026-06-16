@@ -24,7 +24,8 @@ sealed interface ScanUiState {
 class TranslatorViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
-    private val repository = ChemicalRepository(db.chemicalDao(), db.scanHistoryDao())
+    private val foodDbHelper = FoodDatabaseHelper(application)
+    private val repository = ChemicalRepository(db.chemicalDao(), db.scanHistoryDao(), foodDbHelper)
 
     // UI Tab State: "translator", "history", "profile", "directory"
     private val _currentTab = MutableStateFlow("translator")

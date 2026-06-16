@@ -9,7 +9,8 @@ import android.util.Log
 
 class ChemicalRepository(
     private val chemicalDao: ChemicalDao,
-    private val scanHistoryDao: ScanHistoryDao
+    private val scanHistoryDao: ScanHistoryDao,
+    private val foodDbHelper: FoodDatabaseHelper
 ) {
     private val TAG = "ChemicalRepository"
 
@@ -193,10 +194,50 @@ class ChemicalRepository(
         val scanResults = mutableListOf<ChemicalEntity>()
         val allLocal = chemicalDao.getAllChemicals().firstOrNull() ?: emptyList()
 
-        for (chemical in allLocal) {
-            // Check if the chemical name appears as a substring in the ingredients
-            if (normalizedInput.contains(chemical.name)) {
-                scanResults.add(chemical)
+        val ingredientsList = ingredientsText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
+        // If the user just scanned a block of text, the fallback is substring matching
+        if (ingredientsList.size <= 1) {
+            for (chemical in allLocal) {
+                if (normalizedInput.contains(chemical.name)) {
+                    if (!scanResults.any { it.name == chemical.name }) {
+                        scanResults.add(chemical)
+                    }
+                }
+            }
+        } else {
+            // Comma separated list of ingredients
+            for (ingredient in ingredientsList) {
+                val normalizedIngredient = ingredient.lowercase()
+                var matched = false
+                // Check Room Database (Pre-seeded chemicals)
+                for (chemical in allLocal) {
+                    if (normalizedIngredient.contains(chemical.name)) {
+                        if (!scanResults.any { it.name == chemical.name }) {
+                            scanResults.add(chemical)
+                        }
+                        matched = true
+                    }
+                }
+
+                // Check FooDB SQLite Database
+                if (!matched) {
+                    val dbNutrients = foodDbHelper.getNutrientsForFood(normalizedIngredient)
+                    if (dbNutrients != null) {
+                        val chem = ChemicalEntity(
+                            name = normalizedIngredient,
+                            displayName = ingredient.replaceFirstChar { it.uppercase() },
+                            plainEnglishName = "Food Component",
+                            purpose = "Analyzed nutrient profile or food component.",
+                            riskLevel = "LOW",
+                            riskDescription = "Validated in local nutrition database.",
+                            dietarySafety = dbNutrients // Passes along Vegan/Allergy tags
+                        )
+                        if (!scanResults.any { it.name == chem.name }) {
+                            scanResults.add(chem)
+                        }
+                    }
+                }
             }
         }
 
