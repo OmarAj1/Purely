@@ -9,7 +9,6 @@ Scan or search food and cosmetic chemical ingredients to translate them into pla
 - **Health Risk Index**: Color-coded risk indicators (Low, Moderate, High) and overall safety scoring based on recognized health index data.
 - **Dietary Profile & Allergies**: Personalize your profile to receive warnings when scanned ingredients violate your dietary restrictions or trigger allergies.
 - **Offline Capability**: Features an offline directory and local SQLite matching so you can scan and search ingredients remotely without an internet connection.
-- **AI-Powered Translations**: Optionally fall back to Gemini AI for cutting-edge translations of unrecognized chemicals and additives.
 
 ## Architecture
 
@@ -25,12 +24,6 @@ This application is built natively for Android utilizing modern development arch
 2. Open the project in Android Studio (Giraffe or newer recommended).
 3. Let Gradle sync and build dependencies.
 4. Run the project on an Android Emulator or a physical device running Android (API Level 24+).
-
-### Secrets Management
-
-If you plan to utilize the Gemini AI features locally, you may need an API key. 
-1. Copy `.env.example` to `.env` in the root directory.
-2. Insert your Google Gemini API Key inside the `.env` file.
 
 ## Contributing
 

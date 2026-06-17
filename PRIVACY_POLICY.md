@@ -16,11 +16,6 @@ To use the ingredient scanner (OCR), the application requires access to your dev
 ### Local Storage
 Your user profile, dietary preferences, scanned history, and custom settings are stored entirely locally on your device using Android's local storage solutions (e.g., SQLite/Room databases, DataStore). We do not have access to this data.
 
-### AI Translations (Optional)
-If you optionally enable and utilize the Gemini AI fallback feature for unrecognized ingredients, the text of the ingredient will be sent to the Gemini API for translation. 
-- Only the specific ingredient text is transmitted, without linking to your identity or local dietary preferences.
-- Please refer to [Google's Privacy Policy](https://policies.google.com/privacy) for how they handle API requests.
-
 ## 2. Third-Party Services
 As an open-source tool, we do not integrate third-party trackers, analytics (like Google Analytics or Crashlytics), or advertising SDKs. 
 
