@@ -4,10 +4,12 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import android.util.Log
 
 class ChemicalRepository(
+    private val context: Context,
     private val chemicalDao: ChemicalDao,
     private val scanHistoryDao: ScanHistoryDao,
     private val foodDbHelper: FoodDatabaseHelper
@@ -18,7 +20,28 @@ class ChemicalRepository(
     val scanHistory: Flow<List<ScanHistoryEntity>> = scanHistoryDao.getAllHistory()
 
     fun searchChemicals(query: String): Flow<List<ChemicalEntity>> {
-        return chemicalDao.searchChemicals(query.trim())
+        val trimmedQuery = query.trim()
+        return chemicalDao.searchChemicals(trimmedQuery).map { roomResults ->
+            val merged = roomResults.toMutableList()
+            if (trimmedQuery.isNotBlank()) {
+                val foodDbResults = foodDbHelper.searchFoods(trimmedQuery)
+                val extraDbResults = com.example.DatabaseManager.searchAllDatabases(context, trimmedQuery)
+                
+                val roomNames = merged.map { it.name }.toSet()
+                
+                for (food in foodDbResults) {
+                    if (food.name !in roomNames) {
+                        merged.add(food)
+                    }
+                }
+                for (extra in extraDbResults) {
+                    if (extra.name !in roomNames && !merged.any { it.name == extra.name }) {
+                        merged.add(extra)
+                    }
+                }
+            }
+            merged
+        }
     }
 
     suspend fun getChemicalByName(name: String): ChemicalEntity? {
@@ -236,6 +259,19 @@ class ChemicalRepository(
                         if (!scanResults.any { it.name == chem.name }) {
                             scanResults.add(chem)
                         }
+                        matched = true
+                    }
+                }
+                
+                // Check Extra SQLite Databases
+                if (!matched) {
+                    val extraResults = com.example.DatabaseManager.searchAllDatabases(context, normalizedIngredient)
+                    if (extraResults.isNotEmpty()) {
+                        val chem = extraResults.first()
+                        if (!scanResults.any { it.name == chem.name }) {
+                            scanResults.add(chem)
+                        }
+                        matched = true
                     }
                 }
             }

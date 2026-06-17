@@ -47,7 +47,12 @@ fun TranslatorDashboardScreen(
     val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
     val userSettings by viewModel.userSettings.collectAsStateWithLifecycle()
 
-    var showSubscriptionDialog by remember { mutableStateOf(false) }
+    var showExplorer by remember { mutableStateOf(false) }
+
+    if (showExplorer) {
+        DatabaseExplorerScreen(onBack = { showExplorer = false })
+        return
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -58,12 +63,14 @@ fun TranslatorDashboardScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        IconButton(onClick = { showExplorer = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "View Databases",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "ChemTranslator",
@@ -153,9 +160,23 @@ fun ScanAndTranslateTab(
     var rawIngredientsText by remember { mutableStateOf("") }
     val scanUiState by viewModel.scanState.collectAsStateWithLifecycle()
 
+    var isCameraScannerOpen by remember { mutableStateOf(false) }
+
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+
+    if (isCameraScannerOpen) {
+        CameraScannerScreen(
+            onTextExtracted = { text ->
+                rawIngredientsText = text
+                if (productName.isBlank()) productName = "Scanned Product"
+                viewModel.processIngredientsScan(productName, rawIngredientsText)
+            },
+            onClose = { isCameraScannerOpen = false }
+        )
+        return
+    }
 
     // Sample Simulation Presets representing common additives
     val presets = listOf(
@@ -216,10 +237,7 @@ fun ScanAndTranslateTab(
                 onClick = {
                     keyboardController?.hide()
                     focusManager.clearFocus()
-                    // Simulate point-and-scan camera scan of classical high hazard product
-                    productName = "Classic Strawberry Candy"
-                    rawIngredientsText = "Sugar, Corn Syrup, Citric Acid, Red 40, Artificial Strawberry Flavor, Yellow 5, Titanium Dioxide"
-                    viewModel.processIngredientsScan(productName, rawIngredientsText)
+                    isCameraScannerOpen = true
                 },
                 colors = CardDefaults.cardColors(
                     containerColor = if (isSystemInDarkTheme()) Color(0xFF1D201A) else Color(0xFFE2E9D8)

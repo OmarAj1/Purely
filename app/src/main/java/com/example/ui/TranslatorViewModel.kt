@@ -25,7 +25,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     private val db = AppDatabase.getDatabase(application)
     private val foodDbHelper = FoodDatabaseHelper(application)
-    private val repository = ChemicalRepository(db.chemicalDao(), db.scanHistoryDao(), foodDbHelper)
+    private val repository = ChemicalRepository(application, db.chemicalDao(), db.scanHistoryDao(), foodDbHelper)
 
     // UI Tab State: "translator", "history", "profile", "directory"
     private val _currentTab = MutableStateFlow("translator")

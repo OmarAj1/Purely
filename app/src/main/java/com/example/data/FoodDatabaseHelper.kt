@@ -59,4 +59,30 @@ class FoodDatabaseHelper(private val context: Context) : SQLiteOpenHelper(contex
         }
         return result
     }
+
+    fun searchFoods(query: String): List<ChemicalEntity> {
+        val db = getReadableDatabase()
+        val results = mutableListOf<ChemicalEntity>()
+        try {
+            db.rawQuery("SELECT name, nutrients FROM foods WHERE name LIKE ? LIMIT 50", arrayOf("%$query%")).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(0)
+                    val nutrients = cursor.getString(1)
+                    val chem = ChemicalEntity(
+                        name = name,
+                        displayName = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
+                        plainEnglishName = "Food Component",
+                        purpose = "Analyzed nutrient profile or food component.",
+                        riskLevel = "LOW",
+                        riskDescription = "Validated in local nutrition database.",
+                        dietarySafety = nutrients
+                    )
+                    results.add(chem)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error searching database for $query: ${e.message}")
+        }
+        return results
+    }
 }
