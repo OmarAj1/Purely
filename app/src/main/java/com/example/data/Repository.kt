@@ -75,7 +75,7 @@ class ChemicalRepository(
                     name = "titanium dioxide",
                     displayName = "Titanium Dioxide (E171)",
                     plainEnglishName = "White Mineral Pigment",
-                    purpose = "Gives foods, candies, chewing gums, salad dressings, and cosmetics a bright, opaque white color.",
+                    purpose = "Gives foods, candies, chewing gums, salad dressings, and cosmetics a bright opaque white color.",
                     riskLevel = "HIGH",
                     riskDescription = "Classified as a possible human carcinogen. Banned in the European Union (2022) due to concerns about genotoxicity (ability to damage cell DNA) and bioaccumulation.",
                     dietarySafety = "vegan,gluten_free,flag:titanium_dioxide"
@@ -202,6 +202,87 @@ class ChemicalRepository(
         }
     }
 
+    private var fuzzyDictionary: List<String>? = null
+
+    private fun levenshteinDistance(s1: String, s2: String): Int {
+        val a = s1.lowercase()
+        val b = s2.lowercase()
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+
+        for (i in 0..a.length) {
+            for (j in 0..b.length) {
+                if (i == 0) dp[i][j] = j
+                else if (j == 0) dp[i][j] = i
+                else {
+                    dp[i][j] = minOf(
+                        dp[i - 1][j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1,
+                        dp[i - 1][j] + 1,
+                        dp[i][j - 1] + 1
+                    )
+                }
+            }
+        }
+        return dp[a.length][b.length]
+    }
+
+    private suspend fun getFuzzyDictionary(): List<String> = withContext(Dispatchers.IO) {
+        if (fuzzyDictionary != null) return@withContext fuzzyDictionary!!
+        val dict = mutableSetOf<String>()
+
+        chemicalDao.getAllChemicals().firstOrNull()?.forEach { dict.add(it.name.lowercase()) }
+
+        context.getDatabasePath(FoodDatabaseHelper.DB_NAME)?.let { path ->
+            if (path.exists()) {
+                try {
+                    android.database.sqlite.SQLiteDatabase.openDatabase(path.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { db ->
+                        db.rawQuery("SELECT name FROM foods", null).use { cursor ->
+                            while (cursor.moveToNext()) {
+                                cursor.getString(0)?.let { dict.add(it.lowercase()) }
+                            }
+                        }
+                    }
+                } catch (e: Exception) { Log.e(TAG, "Error loading foods dict", e) }
+            }
+        }
+
+        com.example.DatabaseManager.openDatabase(context, "MergedFoodDB.db")?.use { db ->
+            try {
+                db.rawQuery("SELECT name FROM food_additives", null).use { c ->
+                    while (c.moveToNext()) c.getString(0)?.let { dict.add(it.lowercase()) }
+                }
+                db.rawQuery("SELECT chemical_name FROM Food_flavourings", null).use { c ->
+                    while (c.moveToNext()) c.getString(0)?.let { dict.add(it.lowercase()) }
+                }
+            } catch (e: Exception) { Log.e(TAG, "Error loading merged dict", e) }
+        }
+
+        val sortedList = dict.toList()
+        fuzzyDictionary = sortedList
+        return@withContext sortedList
+    }
+
+    private suspend fun findClosestIngredient(scannedWord: String): String {
+        val dict = getFuzzyDictionary()
+        if (dict.isEmpty()) return scannedWord
+
+        val word = scannedWord.trim().lowercase()
+        if (word in dict) return word
+
+        var bestMatch = word
+        var minDistance = Int.MAX_VALUE
+
+        for (candidate in dict) {
+            if (kotlin.math.abs(candidate.length - word.length) > 3) continue
+
+            val dist = levenshteinDistance(word, candidate)
+            if (dist < minDistance && dist <= 2) {
+                minDistance = dist
+                bestMatch = candidate
+            }
+        }
+        return bestMatch
+    }
+
     /**
      * Translates and breaks down a raw list of ingredients locally.
      * Splits words locally and performs dynamic keyword searches in our database.
@@ -217,7 +298,12 @@ class ChemicalRepository(
         val scanResults = mutableListOf<ChemicalEntity>()
         val allLocal = chemicalDao.getAllChemicals().firstOrNull() ?: emptyList()
 
-        val ingredientsList = ingredientsText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val rawIngredientsList = ingredientsText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        
+        // Fuzzy Matching Correction
+        val ingredientsList = rawIngredientsList.map { rawWord ->
+             findClosestIngredient(rawWord)
+        }
 
         // If the user just scanned a block of text, the fallback is substring matching
         if (ingredientsList.size <= 1) {
