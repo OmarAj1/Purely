@@ -12,43 +12,68 @@ import traceback
 DB_FILE = "MasterUnifiedDB.db"
 WORD_COUNT_THRESHOLD = 5  # Names with more than this many words will be processed
 
-# Active models currently available under Google Gemini Free Tier.
-# Each model has its own separate quota (typically 15 RPM).
-# Running them concurrently allows you to process items much faster and maximize your free allowance!
+# Active models for Ollama.
+# We will use several threads targeting the same model name.
 ACTIVE_MODELS = [
-    "gemini-3.1-flash-lite-preview"
+    "llama3.2",
+    "llama3.2",
+    "llama3.2",
+    "llama3.2",
+    "llama3.2"
 ]
 
 def load_api_key():
-    # 1. Look in environment variables
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        return api_key.strip()
-    
-    # 2. Aggressively search for env files (Windows users often hide extensions)
-    env_paths = [".env", "env.txt", ".env.txt", ".env.example"]
-    for path in env_paths:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if "GEMINI_API_KEY" in line and "=" in line:
-                            k, v = line.strip().split("=", 1)
-                            val = v.strip().replace('"', '').replace("'", "")
-                            if val and val != "your_gemini_api_key_here":
-                                print(f"[✓] Automatically loaded API key from {path}")
-                                return val
-            except Exception:
-                pass
+    return "ollama_local"
+
+def check_and_merge_journal():
+    journal_file = f"{DB_FILE}-journal"
+    wal_file = f"{DB_FILE}-wal"
+    if os.path.exists(journal_file) or os.path.exists(wal_file):
+        print(f"[*] Found existing SQLite journal/wal file. Attempting to merge/recover...", flush=True)
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=60.0)
+            cursor = conn.cursor()
+            # SQLite automatically recovers the rollback journal on connection.
+            cursor.execute("SELECT 1")
+            # If it's a WAL, we can checkpoint it explicitly.
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+            conn.close()
+            print("[✓] Journal successfully merged into main database.", flush=True)
+        except Exception as e:
+            print(f"[!] Error recovering journal: {e}")
+
+def test_ollama_connection():
+    print("[.] Testing connection to local Ollama server (http://localhost:11434)...", flush=True)
+    try:
+        url = "http://localhost:11434/api/tags"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_content = response.read().decode("utf-8")
+            data = json.loads(res_content)
+            models = [m["name"] for m in data.get("models", [])]
+            print(f"[✓] Successfully connected to Ollama!")
+            print(f"[✓] Available models: {', '.join(models) if models else 'None installed!'}")
             
-    # 3. Interactive fallback
-    print("\n[!] API Key not found automatically in .env")
-    user_key = input("Please paste your GEMINI_API_KEY here and press Enter: ").strip()
-    if user_key:
-        return user_key
-    
-    print("\n[!] Exiting because no API Key was provided.")
-    sys.exit(1)
+            # Warn if active model might be missing
+            for model in set(ACTIVE_MODELS):
+                model_base = model.split(':')[0]
+                installed = any(m.startswith(model_base) for m in models)
+                if not installed:
+                    print(f"\n[!] WARNING: Model '{model}' may not be installed.")
+                    print(f"    Please run 'ollama run {model}' in your terminal to download it.")
+            
+            return True
+    except urllib.error.URLError as e:
+        print("\n[!] FATAL ERROR: Cannot connect to Ollama.")
+        print(f"    Details: {e.reason}")
+        print("\n    Please make sure Ollama is installed and running!")
+        print("    You can start it by opening a new terminal and typing:")
+        print("        ollama serve")
+        return False
+    except Exception as e:
+        print(f"\n[!] Unexpected error checking Ollama: {e}")
+        return False
 
 def fetch_long_name_ingredients():
     """Select entries where the name field is excessively long, indicating merged information."""
@@ -83,7 +108,10 @@ def fetch_long_name_ingredients():
             
     return selected_rows
 
-def ask_gemini_to_clean(api_key, model, row_data, max_retries=6):
+# Pacing for Ollama models (can be much faster depending on local GPU!)
+PACING_SEC = 0.5
+
+def ask_ollama_to_clean(api_key, model, row_data, max_retries=10):
     row_id, name, desc, code, tox, cat, diet = row_data
     
     prompt = f"""
@@ -115,40 +143,30 @@ You must return a raw JSON object with these EXACT keys (maintain standard spell
 }}
 """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = "http://localhost:11434/api/generate"
     payload_dict = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.1
-        }
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json"
     }
     
     payload_bytes = json.dumps(payload_dict).encode("utf-8")
-    delay = 4.0 # Base rate-limiting recovery delay
+    delay = 10.0 # Base recovery delay
     
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, data=payload_bytes, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=45) as response:
+            with urllib.request.urlopen(req, timeout=90) as response: # Ollama can be slow
                 res_content = response.read().decode("utf-8")
                 res_json = json.loads(res_content)
                 
                 try:
-                    raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    raw_text = res_json["response"].strip()
                 except KeyError as e:
                     print(f" [!] KeyError parsing response from {model}: {res_json}")
                     raise e
                 
-                # Clean markdown code blocks if present
-                if raw_text.startswith("```"):
-                    lines = raw_text.splitlines()
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].strip() == "```":
-                        lines = lines[:-1]
-                    raw_text = "\n".join(lines).strip()
-                    
                 try:
                     return json.loads(raw_text)
                 except json.JSONDecodeError as e:
@@ -156,14 +174,10 @@ You must return a raw JSON object with these EXACT keys (maintain standard spell
                     raise e
                     
         except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 500, 502, 504):
-                print(f" [!] {model} hit HTTP {e.code}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-                delay *= 2.0
-            else:
-                err_msg = e.read().decode("utf-8", errors="ignore")
-                print(f" [!] {model} returned status {e.code}: {err_msg[:120]}")
-                time.sleep(2)
+            err_msg = e.read().decode("utf-8", errors="ignore")
+            print(f" [!] {model} hit HTTP {e.code}: {err_msg[:120]}... Retrying in {delay:.1f}s...")
+            time.sleep(delay)
+            delay *= 2.0
         except urllib.error.URLError as e:
             print(f" [!] {model} Network error (URLError): {e.reason}. Retrying in {delay:.1f}s...")
             time.sleep(delay)
@@ -214,9 +228,7 @@ def db_writer_thread(write_queue):
         print("\n[✓] Database writer successfully finalized and persisted all changes.")
 
 def model_worker_thread(model, api_key, request_queue, write_queue, stats_tracker):
-    """Dedicated model worker that processes items at exactly <= 13 RPM to completely avoid rate limits."""
-    # Free tier safe pacing: 1 request every 4.8 seconds keeps us strictly below 15 RPM
-    PACING_SEC = 4.8 
+    """Dedicated model worker that processes items slowly to avoid rate limits."""
     
     while True:
         row_data = request_queue.get()
@@ -227,7 +239,7 @@ def model_worker_thread(model, api_key, request_queue, write_queue, stats_tracke
             row_id, original_name = row_data[0], row_data[1]
             start_time = time.time()
             
-            result = ask_gemini_to_clean(api_key, model, row_data)
+            result = ask_ollama_to_clean(api_key, model, row_data)
             
             if result:
                 clean_name = result.get("name", original_name)
@@ -246,10 +258,13 @@ def model_worker_thread(model, api_key, request_queue, write_queue, stats_tracke
                 stats_tracker["failed"] += 1
                 print(f"[{model}] Failed to clean ID {row_id}: \"{original_name[:40]}...\"")
                 
-            # Respect precise pacing so we completely avoid triggering rate limits on the Free Tier!
             elapsed_time = time.time() - start_time
             sleep_needed = max(0.1, PACING_SEC - elapsed_time)
             time.sleep(sleep_needed)
+        except urllib.error.HTTPError as e:
+            print(f"[{model}] Worker thread is shutting down due to fatal error: HTTP {e.code}")
+            request_queue.put(row_data) # Requeue the item for a different model
+            break
         except Exception as e:
             print(f"[{model}] Fatal unhandled error in worker task: {type(e).__name__} - {e}")
             traceback.print_exc()
@@ -258,9 +273,14 @@ def model_worker_thread(model, api_key, request_queue, write_queue, stats_tracke
 
 def run_cleaner():
     print("="*65)
-    print("           GEMINI FREE-TIER MULTI-MODEL DATABASE CLEANER")
+    print("           OLLAMA LOCAL MULTI-THREAD DATABASE CLEANER")
     print("           (Powered by built-in Python threading)")
     print("="*65)
+    
+    if not test_ollama_connection():
+        sys.exit(1)
+        
+    check_and_merge_journal()
     
     api_key = load_api_key()
     rows = fetch_long_name_ingredients()
@@ -273,11 +293,10 @@ def run_cleaner():
         print("[!] No rows require cleaning. Cleanup completed!")
         return
         
-    print(f"[✓] Active Free-Tier Quota Channels: {ACTIVE_MODELS}")
-    print(f"[✓] Pacing: Strictly <= 13 RPM per model (Safe Total Throughput ~ {len(ACTIVE_MODELS) * 13} requests/minute)")
+    print(f"[✓] Active Ollama Models: {ACTIVE_MODELS}")
+    print(f"[✓] Pacing: Minimum {PACING_SEC}s between requests")
     print("-"*65)
-    print("Starting automatically in 2 seconds... (Press Ctrl+C to pause or stop safely at any time)")
-    time.sleep(2)
+    print("Starting... (Press Ctrl+C to pause or stop safely at any time)")
     
     # Initialize queues
     request_queue = queue.Queue()
@@ -296,40 +315,66 @@ def run_cleaner():
     # Start the model workers
     worker_threads = []
     for model in ACTIVE_MODELS:
-        # Add stop signals to guide workers on queue completion
-        request_queue.put(None) 
-        
         t = threading.Thread(target=model_worker_thread, args=(model, api_key, request_queue, write_queue, stats_tracker), daemon=True)
         worker_threads.append(t)
         t.start()
         
-    # Wait for the processing queue to fully execute
-    request_queue.join()
-    
-    # Wait for all workers to complete/stop
-    for t in worker_threads:
-        t.join()
-    
-    # Signal writer that all data is parsed & clean
-    write_queue.put(None)
-    write_queue.join()
-    writer_thread.join()
-    
-    print("\n" + "="*65)
-    print("                          CLEANUP SUMMARY")
-    print("="*65)
-    print(f"Total entries processed: {stats_tracker['success'] + stats_tracker['failed']}")
-    print(f"Successfully cleaned:  {stats_tracker['success']}")
-    print(f"Failed / Skipped:      {stats_tracker['failed']}")
-    print("All updates saved successfully into the same database.")
-    print("="*65 + "\n")
+    try:
+        # Wait for the processing queue to fully execute. Use a loop so KeyboardInterrupt can be caught.
+        last_print_time = time.time()
+        while not request_queue.empty():
+            time.sleep(1.0)
+            if time.time() - last_print_time >= 10.0:
+                print(f"[⌛] Progress: {stats_tracker['success'] + stats_tracker['failed']} / {total_elements} processed. {request_queue.qsize()} remaining in queue.", flush=True)
+                last_print_time = time.time()
+                
+            if not any(t.is_alive() for t in worker_threads):
+                print("\n[!] All model workers have died permanently! Aborting processing...")
+                break
+            
+        # Add stop signals to guide workers on queue completion
+        for _ in ACTIVE_MODELS:
+            request_queue.put(None)
+            
+        # If we aborted because all workers died, we shouldn't join on the queue, because nobody will consume the remaining items.
+        if any(t.is_alive() for t in worker_threads):
+            request_queue.join()
+        else:
+            # Fake drain the queue so we can exit gracefully
+            with request_queue.mutex:
+                request_queue.queue.clear()
+                request_queue.unfinished_tasks = 0
+                request_queue.all_tasks_done.notify_all()
+        
+        # Wait for all workers to complete/stop
+        for t in worker_threads:
+            t.join()
+            
+    except KeyboardInterrupt:
+        print("\n\n[!] Process interrupted (Ctrl+C). Saving current progress and shutting down safely...")
+        # Clear the remaining tasks so we can exit gracefully
+        with request_queue.mutex:
+            request_queue.queue.clear()
+            request_queue.unfinished_tasks = 0
+            request_queue.all_tasks_done.notify_all()
+        # We don't join the remaining worker threads because they are daemons and will naturally die or are sleeping
+        
+    finally:
+        # Signal writer that all data is parsed & and it should finalize transactions
+        print("\n[!] Flushing final records to database and cleaning up journal...")
+        write_queue.put(None)
+        write_queue.join()
+        writer_thread.join()
+        
+        print("\n" + "="*65)
+        print("                          CLEANUP SUMMARY")
+        print("="*65)
+        print(f"Total entries processed: {stats_tracker['success'] + stats_tracker['failed']}")
+        print(f"Successfully cleaned:  {stats_tracker['success']}")
+        print(f"Failed / Skipped:      {stats_tracker['failed']}")
+        print("All updates saved successfully into the database. Safe to exit.")
+        print("="*65 + "\n")
 
 if __name__ == "__main__":
-    try:
-        run_cleaner()
-    except KeyboardInterrupt:
-        print("\n\n[!] Cleaning paused safely. All database upgrades up to this point have been saved.")
-    except Exception as e:
-        print(f"\n\n[!] Fatal error: {type(e).__name__} - {e}")
-        traceback.print_exc()
+    run_cleaner()
 
