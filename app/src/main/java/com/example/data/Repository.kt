@@ -5,7 +5,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 import android.util.Log
 
 class ChemicalRepository(
@@ -25,8 +27,6 @@ class ChemicalRepository(
             val merged = roomResults.toMutableList()
             if (trimmedQuery.isNotBlank()) {
                 val foodDbResults = foodDbHelper.searchFoods(trimmedQuery)
-                val extraDbResults = com.example.DatabaseManager.searchAllDatabases(context, trimmedQuery)
-                
                 val roomNames = merged.map { it.name }.toSet()
                 
                 for (food in foodDbResults) {
@@ -34,14 +34,9 @@ class ChemicalRepository(
                         merged.add(food)
                     }
                 }
-                for (extra in extraDbResults) {
-                    if (extra.name !in roomNames && !merged.any { it.name == extra.name }) {
-                        merged.add(extra)
-                    }
-                }
             }
             merged
-        }
+        }.flowOn(Dispatchers.IO)
     }
 
     suspend fun getChemicalByName(name: String): ChemicalEntity? {
@@ -202,42 +197,64 @@ class ChemicalRepository(
         }
     }
 
-    private var fuzzyDictionary: List<String>? = null
-
     private fun levenshteinDistance(s1: String, s2: String): Int {
-        val a = s1.lowercase()
-        val b = s2.lowercase()
-        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        if (s1 == s2) return 0
+        if (s1.isEmpty()) return s2.length
+        if (s2.isEmpty()) return s1.length
 
-        for (i in 0..a.length) {
-            for (j in 0..b.length) {
-                if (i == 0) dp[i][j] = j
-                else if (j == 0) dp[i][j] = i
-                else {
-                    dp[i][j] = minOf(
-                        dp[i - 1][j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1,
-                        dp[i - 1][j] + 1,
-                        dp[i][j - 1] + 1
-                    )
-                }
+        var v0 = IntArray(s2.length + 1) { it }
+        var v1 = IntArray(s2.length + 1)
+
+        for (i in 0 until s1.length) {
+            v1[0] = i + 1
+            var minV1 = v1[0]
+            for (j in 0 until s2.length) {
+                val cost = if (s1[i] == s2[j]) 0 else 1
+                v1[j + 1] = minOf(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost)
+                if (v1[j + 1] < minV1) minV1 = v1[j + 1]
             }
+            if (minV1 > 2) return 3 // Early exit if we already exceed max allowed distance
+            val temp = v0
+            v0 = v1
+            v1 = temp
         }
-        return dp[a.length][b.length]
+        return v0[s2.length]
     }
 
-    private suspend fun getFuzzyDictionary(): List<String> = withContext(Dispatchers.IO) {
-        if (fuzzyDictionary != null) return@withContext fuzzyDictionary!!
-        val dict = mutableSetOf<String>()
+    private suspend fun findClosestIngredient(scannedWord: String): String = withContext(Dispatchers.IO) {
+        val word = scannedWord.trim().lowercase()
+        if (word.isEmpty()) return@withContext scannedWord
 
-        chemicalDao.getAllChemicals().firstOrNull()?.forEach { dict.add(it.name.lowercase()) }
+        val firstChar = word.firstOrNull()?.toString() ?: return@withContext word
+        val minLen = maxOf(1, word.length - 2)
+        val maxLen = word.length + 2
 
+        val candidates = mutableSetOf<String>()
+        val args = arrayOf("$firstChar%", minLen.toString(), maxLen.toString())
+
+        // 1. Room DB (purely_db)
+        context.getDatabasePath("purely_db")?.let { path ->
+            if (path.exists()) {
+                try {
+                    android.database.sqlite.SQLiteDatabase.openDatabase(path.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { db ->
+                        db.rawQuery("SELECT name FROM chemicals WHERE name LIKE ? AND length(name) BETWEEN ? AND ?", args).use { cursor ->
+                            while (cursor.moveToNext()) {
+                                cursor.getString(0)?.let { candidates.add(it.lowercase()) }
+                            }
+                        }
+                    }
+                } catch (e: Exception) { Log.e(TAG, "Error loading chemicals dict", e) }
+            }
+        }
+
+        // 2. FoodDatabaseHelper DB
         context.getDatabasePath(FoodDatabaseHelper.DB_NAME)?.let { path ->
             if (path.exists()) {
                 try {
                     android.database.sqlite.SQLiteDatabase.openDatabase(path.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { db ->
-                        db.rawQuery("SELECT name FROM foods", null).use { cursor ->
+                        db.rawQuery("SELECT name FROM foods WHERE name LIKE ? AND length(name) BETWEEN ? AND ?", args).use { cursor ->
                             while (cursor.moveToNext()) {
-                                cursor.getString(0)?.let { dict.add(it.lowercase()) }
+                                cursor.getString(0)?.let { candidates.add(it.lowercase()) }
                             }
                         }
                     }
@@ -245,42 +262,29 @@ class ChemicalRepository(
             }
         }
 
-        com.example.DatabaseManager.openDatabase(context, "MergedFoodDB.db")?.use { db ->
+        // 3. MasterUnifiedDB
+        com.example.DatabaseManager.openDatabase(context, "MasterUnifiedDB.db")?.use { db ->
             try {
-                db.rawQuery("SELECT name FROM food_additives", null).use { c ->
-                    while (c.moveToNext()) c.getString(0)?.let { dict.add(it.lowercase()) }
+                db.rawQuery("SELECT name FROM UnifiedIngredients WHERE name LIKE ? AND length(name) BETWEEN ? AND ?", args).use { c ->
+                    while (c.moveToNext()) c.getString(0)?.let { candidates.add(it.lowercase()) }
                 }
-                db.rawQuery("SELECT chemical_name FROM Food_flavourings", null).use { c ->
-                    while (c.moveToNext()) c.getString(0)?.let { dict.add(it.lowercase()) }
-                }
-            } catch (e: Exception) { Log.e(TAG, "Error loading merged dict", e) }
+            } catch (e: Exception) { Log.e(TAG, "Error loading master dict", e) }
         }
 
-        val sortedList = dict.toList()
-        fuzzyDictionary = sortedList
-        return@withContext sortedList
-    }
-
-    private suspend fun findClosestIngredient(scannedWord: String): String {
-        val dict = getFuzzyDictionary()
-        if (dict.isEmpty()) return scannedWord
-
-        val word = scannedWord.trim().lowercase()
-        if (word in dict) return word
+        if (word in candidates) return@withContext word
 
         var bestMatch = word
         var minDistance = Int.MAX_VALUE
 
-        for (candidate in dict) {
-            if (kotlin.math.abs(candidate.length - word.length) > 3) continue
-
+        for (candidate in candidates) {
+            ensureActive()
             val dist = levenshteinDistance(word, candidate)
             if (dist < minDistance && dist <= 2) {
                 minDistance = dist
                 bestMatch = candidate
             }
         }
-        return bestMatch
+        return@withContext bestMatch
     }
 
     private fun cleanIngredient(ingredient: String): String {
@@ -294,8 +298,40 @@ class ChemicalRepository(
             "added", "preservative", "preservatives", "and", "or", "of", "contains",
             "contain", "less", "than", "percent", "prepared"
         )
-        val words = s.split(Regex("[\\s-]+")).map { it.replace(Regex("[^a-zA-Z0-9]"), "") }.filter { it.isNotEmpty() && it !in fillers }
+        val words = s.split(Regex("[\\s-]+")).filter { it.isNotEmpty() && it !in fillers }
         return words.joinToString(" ")
+    }
+
+    private fun parseIngredients(text: String): List<String> {
+        val list = mutableListOf<String>()
+        val current = StringBuilder()
+        var depth = 0
+        for (char in text) {
+            when (char) {
+                '(', '[', '{' -> {
+                    depth++
+                    current.append(char)
+                }
+                ')', ']', '}' -> {
+                    depth--
+                    if (depth < 0) depth = 0
+                    current.append(char)
+                }
+                ',' -> {
+                    if (depth == 0) {
+                        list.add(current.toString().trim())
+                        current.clear()
+                    } else {
+                        current.append(char)
+                    }
+                }
+                else -> current.append(char)
+            }
+        }
+        if (current.isNotBlank()) {
+            list.add(current.toString().trim())
+        }
+        return list
     }
 
     /**
@@ -313,12 +349,6 @@ class ChemicalRepository(
             .replace("\n", ", ")
             .replace(";", ", ")
             .replace(".", ", ")
-            .replace("[", ", ")
-            .replace("]", ", ")
-            .replace("(", ", ")
-            .replace(")", ", ")
-            .replace("{", ", ")
-            .replace("}", ", ")
 
         val normalizedInput = preNormalizedText.lowercase()
 
@@ -327,15 +357,17 @@ class ChemicalRepository(
         val scanResults = mutableListOf<ChemicalEntity>()
         val allLocal = chemicalDao.getAllChemicals().firstOrNull() ?: emptyList()
 
-        val rawIngredientsList = preNormalizedText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val rawIngredientsList = parseIngredients(preNormalizedText).filter { it.isNotEmpty() }
         
         // Fuzzy Matching Correction
         val ingredientsList = rawIngredientsList.map { rawWord ->
+             ensureActive()
              findClosestIngredient(rawWord)
         }
 
         // Substring and fuzzy matching loops
         for (i in ingredientsList.indices) {
+            ensureActive()
             val rawIngredient = rawIngredientsList[i]
             val fuzzyIngredient = ingredientsList[i]
             
@@ -365,7 +397,11 @@ class ChemicalRepository(
             if (!matched) {
                 val queryCandidates = listOf(fuzzyIngredient, rawIngredient, cleanFuzzy, cleanRaw).filter { it.isNotBlank() }.distinct()
                 for (candidate in queryCandidates) {
-                    val chem = foodDbHelper.getIngredientDetails(candidate)
+                    val chemResult = foodDbHelper.getIngredientDetails(candidate)
+                    if (chemResult.isFailure) {
+                        throw chemResult.exceptionOrNull() ?: Exception("Database error")
+                    }
+                    val chem = chemResult.getOrNull()
                     if (chem != null) {
                         if (!scanResults.any { it.name == chem.name }) {
                             scanResults.add(chem)
@@ -381,15 +417,11 @@ class ChemicalRepository(
 
         // Fallback: If list size <= 1, try space-based word matching to catch non-comma lists!
         if (ingredientsList.size <= 1) {
-            val spaceSplits = preNormalizedText.split(Regex("\\s+")).map { it.trim() }.filter { it.length > 2 }
-            for (word in spaceSplits) {
-                val cleanWord = cleanIngredient(word)
-                for (chemical in allLocal) {
-                    val chemName = chemical.name.lowercase()
-                    if (word == chemName || cleanWord == chemName) {
-                        if (!scanResults.any { it.name == chemical.name }) {
-                            scanResults.add(chemical)
-                        }
+            for (chemical in allLocal) {
+                val chemName = chemical.name.lowercase()
+                if (preNormalizedText.contains(chemName)) {
+                    if (!scanResults.any { it.name == chemical.name }) {
+                        scanResults.add(chemical)
                     }
                 }
             }

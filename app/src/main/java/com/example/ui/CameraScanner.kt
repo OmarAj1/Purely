@@ -344,16 +344,16 @@ fun CameraCaptureWithAnalysis(
                                                 val availableWidth = rotatedBitmap.width - finalCropX
                                                 val availableHeight = rotatedBitmap.height - finalCropY
                                                 
-                                                val finalCropWidth = calculatedWidth.coerceIn(1, availableWidth)
-                                                val finalCropHeight = calculatedHeight.coerceIn(1, availableHeight)
+                                                val finalCropWidth = calculatedWidth.coerceAtMost(availableWidth).coerceAtLeast(1)
+                                                val finalCropHeight = calculatedHeight.coerceAtMost(availableHeight).coerceAtLeast(1)
 
                                                 Bitmap.createBitmap(rotatedBitmap, finalCropX, finalCropY, finalCropWidth, finalCropHeight)
                                             } else {
                                                 // Fallback if screen size is somehow not recorded
-                                                val fallbackX = (imageWidth * 0.075f).toInt()
-                                                val fallbackY = (imageHeight * 0.375f).toInt()
-                                                val fallbackWidth = (imageWidth * 0.85f).toInt()
-                                                val fallbackHeight = (imageHeight * 0.25f).toInt()
+                                                val fallbackX = (imageWidth * 0.075f).toInt().coerceIn(0, rotatedBitmap.width - 1)
+                                                val fallbackY = (imageHeight * 0.375f).toInt().coerceIn(0, rotatedBitmap.height - 1)
+                                                val fallbackWidth = (imageWidth * 0.85f).toInt().coerceAtMost(rotatedBitmap.width - fallbackX).coerceAtLeast(1)
+                                                val fallbackHeight = (imageHeight * 0.25f).toInt().coerceAtMost(rotatedBitmap.height - fallbackY).coerceAtLeast(1)
                                                 Bitmap.createBitmap(rotatedBitmap, fallbackX, fallbackY, fallbackWidth, fallbackHeight)
                                             }
                                             

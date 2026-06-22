@@ -17,7 +17,13 @@ class FoodDatabaseHelper(private val context: Context) : SQLiteOpenHelper(contex
 
     private fun checkAndCopyDatabase() {
         val dbPath = context.getDatabasePath(DB_NAME)
-        if (!dbPath.exists()) {
+        val prefs = context.getSharedPreferences("database_prefs", Context.MODE_PRIVATE)
+        val copiedVersion = prefs.getInt("db_version", 0)
+
+        if (!dbPath.exists() || copiedVersion < DB_VERSION) {
+            if (dbPath.exists()) {
+                dbPath.delete()
+            }
             dbPath.parentFile?.mkdirs()
             try {
                 context.assets.open("databases/$DB_NAME").use { inputStream ->
@@ -25,6 +31,7 @@ class FoodDatabaseHelper(private val context: Context) : SQLiteOpenHelper(contex
                         inputStream.copyTo(outputStream)
                     }
                 }
+                prefs.edit().putInt("db_version", DB_VERSION).apply()
                 Log.d(TAG, "Successfully copied database from assets.")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to copy database: ${e.message}", e)
@@ -45,30 +52,39 @@ class FoodDatabaseHelper(private val context: Context) : SQLiteOpenHelper(contex
         // Handled by copy if needed later
     }
 
-    fun getIngredientDetails(foodName: String): ChemicalEntity? {
-        val db = getReadableDatabase()
+    fun getIngredientDetails(foodName: String): Result<ChemicalEntity?> {
         val queryWord = foodName.trim().lowercase()
-        try {
-            db.rawQuery(
-                "SELECT name, description, category, dietary_safety, purpose, health_risks, risk_level, dietary_info, plain_english_name FROM UnifiedIngredients WHERE name LIKE ? OR ? LIKE '%' || name || '%' ORDER BY length(name) DESC LIMIT 1",
-                arrayOf("%$queryWord%", queryWord)
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    return ChemicalEntity(
-                        name = cursor.getString(0) ?: foodName,
-                        displayName = (cursor.getString(8) ?: cursor.getString(0) ?: foodName).replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
-                        plainEnglishName = cursor.getString(8) ?: "Food Component",
-                        purpose = cursor.getString(4) ?: cursor.getString(1) ?: "Analyzed nutrient profile or food component.",
-                        riskLevel = cursor.getString(6) ?: "LOW",
-                        riskDescription = cursor.getString(5) ?: "Validated in local nutrition database.",
-                        dietarySafety = cursor.getString(3) ?: cursor.getString(7) ?: ""
-                    )
+        var lastException: Exception? = null
+        for (attempt in 1..3) {
+            try {
+                val db = getReadableDatabase()
+                db.rawQuery(
+                    "SELECT name, description, category, dietary_safety, purpose, health_risks, risk_level, dietary_info, plain_english_name FROM UnifiedIngredients WHERE name LIKE ? OR ? LIKE '%' || name || '%' ORDER BY length(name) DESC LIMIT 1",
+                    arrayOf("%$queryWord%", queryWord)
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        return Result.success(ChemicalEntity(
+                            name = cursor.getString(0) ?: foodName,
+                            displayName = (cursor.getString(8) ?: cursor.getString(0) ?: foodName).replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
+                            plainEnglishName = cursor.getString(8) ?: "Food Component",
+                            purpose = cursor.getString(4) ?: cursor.getString(1) ?: "Analyzed nutrient profile or food component.",
+                            riskLevel = cursor.getString(6) ?: "LOW",
+                            riskDescription = cursor.getString(5) ?: "Validated in local nutrition database.",
+                            dietarySafety = cursor.getString(3) ?: cursor.getString(7) ?: ""
+                        ))
+                    }
+                    return Result.success(null)
                 }
+            } catch (e: android.database.sqlite.SQLiteDatabaseLockedException) {
+                Log.w(TAG, "Database locked, retrying attempt $attempt")
+                lastException = e
+                Thread.sleep(100L * attempt)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error querying database for $foodName: ${e.message}")
+                return Result.failure(e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error querying database for $foodName: ${e.message}")
         }
-        return null
+        return Result.failure(lastException ?: Exception("Database locked after 3 retries"))
     }
 
     fun searchFoods(query: String): List<ChemicalEntity> {
